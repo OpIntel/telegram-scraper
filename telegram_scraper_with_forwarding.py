@@ -151,7 +151,7 @@ class OptimizedTelegramScraper:
             channel_dir.mkdir(exist_ok=True)
 
             db_file = channel_dir / f'{channel}.db'
-            conn = sqlite3.connect(str(db_file), check_same_thread=False)
+            conn = sqlite3.connect(str(db_file), check_same_thread=False, timeout=30)
             conn.execute('''CREATE TABLE IF NOT EXISTS messages
                           (id INTEGER PRIMARY KEY, message_id INTEGER UNIQUE, date TEXT,
                            sender_id INTEGER, first_name TEXT, last_name TEXT, username TEXT,
@@ -297,7 +297,7 @@ class OptimizedTelegramScraper:
         
         return False
 
-    async def forward_message(self, message, rule: ForwardingRule):
+    async def forward_message(self, message, rule: ForwardingRule, source_channel_id: int = None):
         try:
             if rule.destination_channel.lstrip('-').isdigit():
                 dest_entity = await self.client.get_entity(PeerChannel(int(rule.destination_channel)))
@@ -308,21 +308,34 @@ class OptimizedTelegramScraper:
                 await self.client.forward_messages(dest_entity, message)
                 print(f"  ↪️ Forwarded message {message.id}")
             else:
+                source_name = self.state.get('channel_names', {}).get(rule.source_channel, '')
+                if source_channel_id:
+                    full_id = f"-100{abs(source_channel_id)}" if not str(source_channel_id).startswith('-100') else str(source_channel_id)
+                else:
+                    full_id = rule.source_channel
+                
+                if source_name and source_name != 'no_username':
+                    source_line = f"From: @{source_name} ({full_id})\n─────────────────\n"
+                else:
+                    source_line = f"From: {full_id}\n─────────────────\n"
+                
+                copy_text = source_line + (message.message or '')
+                
                 if message.media and not isinstance(message.media, MessageMediaWebPage):
                     await self.client.send_message(
                         dest_entity,
-                        message.message or '',
+                        copy_text,
                         file=message.media
                     )
                 else:
-                    await self.client.send_message(dest_entity, message.message)
+                    await self.client.send_message(dest_entity, copy_text)
                 print(f"  📋 Copied message {message.id}")
                 
             return True
         except FloodWaitError as e:
             print(f"  ⏳ Rate limited, waiting {e.seconds}s...")
             await asyncio.sleep(e.seconds)
-            return await self.forward_message(message, rule)
+            return await self.forward_message(message, rule, source_channel_id)
         except Exception as e:
             print(f"  ❌ Failed to forward message {message.id}: {e}")
             return False
@@ -373,7 +386,7 @@ class OptimizedTelegramScraper:
                         source_name = self.state.get('channel_names', {}).get(rule.source_channel, rule.source_channel)
                         dest_name = self.state.get('channel_names', {}).get(rule.destination_channel, rule.destination_channel)
                         print(f"\n📨 New message in {source_name} → forwarding to {dest_name}")
-                        await self.forward_message(message, rule)
+                        await self.forward_message(message, rule, chat_id)
         
         self.forwarding_handler = forwarding_handler
         return True
