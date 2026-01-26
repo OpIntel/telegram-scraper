@@ -339,14 +339,16 @@ class OptimizedTelegramScraper:
             return False
         
         source_channels = []
+        source_id_map = {}
         for rule in enabled_rules:
             try:
                 if rule.source_channel.lstrip('-').isdigit():
                     channel_id = int(rule.source_channel)
-                    source_channels.append(channel_id)
                 else:
                     entity = await self.client.get_entity(rule.source_channel)
-                    source_channels.append(entity.id)
+                    channel_id = entity.id
+                source_channels.append(channel_id)
+                source_id_map[channel_id] = rule.source_channel
             except Exception as e:
                 print(f"Failed to get entity for {rule.source_channel}: {e}")
         
@@ -354,14 +356,19 @@ class OptimizedTelegramScraper:
             print("No valid source channels")
             return False
         
-        @self.client.on(events.NewMessage(chats=source_channels))
+        @self.client.on(events.NewMessage(chats=source_channels, incoming=True, outgoing=True))
         async def forwarding_handler(event):
             message = event.message
-            chat_id = str(event.chat_id)
+            chat_id = event.chat_id
             
             for rule in enabled_rules:
-                source_id = rule.source_channel.lstrip('-')
-                if source_id == chat_id.lstrip('-') or source_id == str(abs(int(chat_id))):
+                rule_source_id = None
+                if rule.source_channel.lstrip('-').isdigit():
+                    rule_source_id = int(rule.source_channel)
+                else:
+                    rule_source_id = next((k for k, v in source_id_map.items() if v == rule.source_channel), None)
+                
+                if rule_source_id == chat_id:
                     if self.should_forward_message(message, rule):
                         source_name = self.state.get('channel_names', {}).get(rule.source_channel, rule.source_channel)
                         dest_name = self.state.get('channel_names', {}).get(rule.destination_channel, rule.destination_channel)
