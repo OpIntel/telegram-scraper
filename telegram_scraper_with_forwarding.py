@@ -306,7 +306,7 @@ class OptimizedTelegramScraper:
             
             if rule.forward_mode == "forward":
                 await self.client.forward_messages(dest_entity, message)
-                print(f"  ↪️ Forwarded message {message.id}")
+                print(f"  Forwarded message {message.id}")
             else:
                 source_name = self.state.get('channel_names', {}).get(rule.source_channel, '')
                 if source_channel_id:
@@ -329,15 +329,15 @@ class OptimizedTelegramScraper:
                     )
                 else:
                     await self.client.send_message(dest_entity, copy_text)
-                print(f"  📋 Copied message {message.id}")
+                print(f"  Copied message {message.id}")
                 
             return True
         except FloodWaitError as e:
-            print(f"  ⏳ Rate limited, waiting {e.seconds}s...")
+            print(f"  Rate limited, waiting {e.seconds}s...")
             await asyncio.sleep(e.seconds)
             return await self.forward_message(message, rule, source_channel_id)
         except Exception as e:
-            print(f"  ❌ Failed to forward message {message.id}: {e}")
+            print(f"  Failed to forward message {message.id}: {e}")
             return False
 
     async def setup_forwarding_handler(self):
@@ -385,7 +385,7 @@ class OptimizedTelegramScraper:
                     if self.should_forward_message(message, rule):
                         source_name = self.state.get('channel_names', {}).get(rule.source_channel, rule.source_channel)
                         dest_name = self.state.get('channel_names', {}).get(rule.destination_channel, rule.destination_channel)
-                        print(f"\n📨 New message in {source_name} → forwarding to {dest_name}")
+                        print(f"\n[{time.strftime('%H:%M:%S')}] New message in {source_name} -> forwarding to {dest_name}")
                         await self.forward_message(message, rule, chat_id)
         
         self.forwarding_handler = forwarding_handler
@@ -404,7 +404,7 @@ class OptimizedTelegramScraper:
         rules = self.get_forwarding_rules()
         enabled_rules = [r for r in rules if r.enabled]
         
-        print(f"\n🚀 Forwarding service started!")
+        print(f"\nForwarding service started!")
         print(f"   Monitoring {len(enabled_rules)} rule(s)")
         print("   Press Ctrl+C to stop\n")
         
@@ -416,22 +416,22 @@ class OptimizedTelegramScraper:
             if rule.forward_images: content_types.append("images")
             if rule.forward_videos: content_types.append("videos")
             if rule.forward_documents: content_types.append("documents")
-            print(f"   • {source_name} → {dest_name}")
+            print(f"   - {source_name} -> {dest_name}")
             print(f"     Mode: {rule.forward_mode} | Content: {', '.join(content_types)}")
         
-        print("\n👀 Watching for new messages...\n")
+        print("\nWatching for new messages...\n")
         
         try:
             await self.client.run_until_disconnected()
         except asyncio.CancelledError:
             pass
         except ConnectionError:
-            print("\n⚠️ Connection lost. Returning to menu...")
+            print("\nConnection lost. Returning to menu...")
         except Exception as e:
-            print(f"\n⚠️ Forwarding stopped: {e}")
+            print(f"\nForwarding stopped: {e}")
         finally:
             self.forwarding_active = False
-            print("\n⏹️ Forwarding service stopped")
+            print("\nForwarding service stopped")
 
     async def manage_forwarding_rules(self):
         while True:
@@ -959,6 +959,85 @@ class OptimizedTelegramScraper:
         finally:
             self.continuous_scraping_active = False
 
+    async def continuous_scraping_with_forwarding(self):
+        self.continuous_scraping_active = True
+        self.forwarding_active = True
+        
+        if not self.client.is_connected():
+            await self.client.connect()
+        
+        rules = self.get_forwarding_rules()
+        enabled_rules = [r for r in rules if r.enabled]
+        forwarding_enabled = False
+        
+        if enabled_rules:
+            forwarding_enabled = await self.setup_forwarding_handler()
+        
+        print("\n" + "="*50)
+        print("     CONTINUOUS SCRAPING + FORWARDING SERVICE")
+        print("="*50)
+        
+        if self.state['channels']:
+            print(f"\nScraping {len(self.state['channels'])} channel(s) every 60 seconds")
+            for channel in self.state['channels']:
+                channel_name = self.state.get('channel_names', {}).get(channel, 'Unknown')
+                print(f"   - {channel_name} ({channel})")
+        else:
+            print("\nNo channels configured for scraping")
+        
+        if forwarding_enabled:
+            print(f"\nForwarding {len(enabled_rules)} rule(s):")
+            for rule in enabled_rules:
+                source_name = self.state.get('channel_names', {}).get(rule.source_channel, rule.source_channel)
+                dest_name = self.state.get('channel_names', {}).get(rule.destination_channel, rule.destination_channel)
+                content_types = []
+                if rule.forward_text: content_types.append("T")
+                if rule.forward_images: content_types.append("I")
+                if rule.forward_videos: content_types.append("V")
+                if rule.forward_documents: content_types.append("D")
+                print(f"   - {source_name} -> {dest_name} [{'/'.join(content_types)}]")
+        else:
+            print("\nNo forwarding rules enabled")
+        
+        print("\n" + "="*50)
+        print("Press Ctrl+C to stop")
+        print("="*50 + "\n")
+        
+        try:
+            async def scraping_loop():
+                while self.continuous_scraping_active:
+                    start_time = time.time()
+                    
+                    for channel in list(self.state['channels'].keys()):
+                        if not self.continuous_scraping_active:
+                            break
+                        channel_name = self.state.get('channel_names', {}).get(channel, 'Unknown')
+                        print(f"\n[{time.strftime('%H:%M:%S')}] Checking: {channel_name}")
+                        await self.scrape_channel(channel, self.state['channels'][channel])
+                    
+                    if self.continuous_scraping_active:
+                        elapsed = time.time() - start_time
+                        sleep_time = max(0, 60 - elapsed)
+                        if sleep_time > 0:
+                            next_check = time.strftime('%H:%M:%S', time.localtime(time.time() + sleep_time))
+                            print(f"\nNext scrape cycle at {next_check}")
+                            await asyncio.sleep(sleep_time)
+            
+            scraping_task = asyncio.create_task(scraping_loop())
+            
+            await self.client.run_until_disconnected()
+            
+        except asyncio.CancelledError:
+            pass
+        except ConnectionError:
+            print("\nConnection lost")
+        except Exception as e:
+            print(f"\nService stopped: {e}")
+        finally:
+            self.continuous_scraping_active = False
+            self.forwarding_active = False
+            print("\nCombined service stopped")
+
     def get_export_filename(self, channel: str):
         username = self.state.get('channel_names', {}).get(channel, 'no_username')
         return f"{channel}_{username}"
@@ -1246,6 +1325,7 @@ class OptimizedTelegramScraper:
             print("="*40)
             print("[S] Scrape channels")
             print("[C] Continuous scraping")
+            print("[B] Combined scrape + forward")
             print(f"[M] Media scraping: {'ON' if self.state['scrape_media'] else 'OFF'}")
             print("[L] List & add channels")
             print("[R] Remove channels")
@@ -1311,6 +1391,18 @@ class OptimizedTelegramScraper:
                             await task
                         except asyncio.CancelledError:
                             pass
+                
+                elif choice == 'b':
+                    if not self.state['channels'] and not any(r.get('enabled', True) for r in self.state.get('forwarding_rules', [])):
+                        print("❌ No channels to scrape and no forwarding rules enabled.")
+                        print("   Add channels with [L] or configure forwarding with [W] first.")
+                        continue
+                    try:
+                        await self.continuous_scraping_with_forwarding()
+                    except KeyboardInterrupt:
+                        self.continuous_scraping_active = False
+                        self.forwarding_active = False
+                        print("\nStopping combined service...")
                             
                 elif choice == 'e':
                     await self.export_data()
