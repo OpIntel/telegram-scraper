@@ -516,11 +516,29 @@ class OptimizedTelegramScraper:
         if dest_input.startswith('@'):
             dest_channel = dest_input
         else:
+            # First try parsing as a channel from the tracked list
             dest_channels = self.parse_channel_selection(dest_input)
-            if not dest_channels:
-                print("❌ Invalid destination channel selection")
-                return
-            dest_channel = dest_channels[0]
+            if dest_channels:
+                dest_channel = dest_channels[0]
+            else:
+                # If not in tracked list, try as a raw channel ID (for destination-only channels)
+                try:
+                    if dest_input.lstrip('-').isdigit():
+                        test_id = int(dest_input)
+                        # Try to resolve the channel via Telethon to verify it exists
+                        try:
+                            entity = await self.client.get_entity(PeerChannel(test_id))
+                            dest_channel = dest_input
+                            print(f"✅ Found channel: {getattr(entity, 'title', dest_input)}")
+                        except Exception:
+                            print(f"❌ Could not access channel ID {dest_input}. Make sure this account is a member.")
+                            return
+                    else:
+                        print("❌ Invalid destination channel selection")
+                        return
+                except ValueError:
+                    print("❌ Invalid destination channel selection")
+                    return
         
         print("\n3️⃣ Select content types to forward:")
         print("   [1] Text messages")
