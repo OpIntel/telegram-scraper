@@ -461,6 +461,7 @@ class OptimizedTelegramScraper:
             print("[T] Toggle rule on/off")
             print("[D] Delete rule")
             print("[S] Start forwarding")
+            print("[H] Backfill historical messages")
             print("[B] Back to main menu")
             print("="*45)
             
@@ -483,6 +484,8 @@ class OptimizedTelegramScraper:
                 except KeyboardInterrupt:
                     self.forwarding_active = False
                     print("\nForwarding stopped")
+            elif choice == 'h':
+                await self.backfill_forwarding_interactive()
             elif choice == 'b':
                 break
             else:
@@ -691,6 +694,230 @@ class OptimizedTelegramScraper:
                 print("✅ Rule deleted")
             else:
                 print("❌ Failed to delete rule")
+
+    async def backfill_forwarding_interactive(self):
+        rules = self.get_forwarding_rules()
+        if not rules:
+            print("No forwarding rules configured. Add a rule first.")
+            return
+        
+        print("\n" + "="*45)
+        print("         BACKFILL FORWARDING")
+        print("="*45)
+        print("\nThis will forward historical messages from your")
+        print("scraped database through an existing forwarding rule.\n")
+        
+        for i, rule in enumerate(rules, 1):
+            source_name = self.state.get('channel_names', {}).get(rule.source_channel, rule.source_channel)
+            dest_name = self.state.get('channel_names', {}).get(rule.destination_channel, rule.destination_channel)
+            status = "✅" if rule.enabled else "❌"
+            content_types = []
+            if rule.forward_text: content_types.append("T")
+            if rule.forward_images: content_types.append("I")
+            if rule.forward_videos: content_types.append("V")
+            if rule.forward_documents: content_types.append("D")
+            print(f"  [{i}] {status} {source_name} → {dest_name}")
+            print(f"      Mode: {rule.forward_mode} | Content: {'/'.join(content_types)}")
+        
+        try:
+            idx = int(input("\nSelect rule number to backfill: ")) - 1
+            if not (0 <= idx < len(rules)):
+                print("Invalid rule number")
+                return
+        except ValueError:
+            print("Invalid input")
+            return
+        
+        rule = rules[idx]
+        source_channel = rule.source_channel
+        
+        # Check that we have scraped data for the source channel
+        if source_channel not in self.state['channels']:
+            print(f"❌ No scraped data for source channel {source_channel}")
+            print("   Scrape this channel first, then backfill.")
+            return
+        
+        conn = self.get_db_connection(source_channel)
+        cursor = conn.cursor()
+        
+        # Show date range of available data
+        cursor.execute('SELECT MIN(date), MAX(date), COUNT(*) FROM messages')
+        row = cursor.fetchone()
+        if not row or row[2] == 0:
+            print(f"❌ No messages in database for this channel. Scrape first.")
+            return
+        
+        min_date, max_date, total_count = row
+        print(f"\n📊 Available data:")
+        print(f"   Date range: {min_date} → {max_date}")
+        print(f"   Total messages: {total_count}")
+        
+        # Date range filter
+        print(f"\n📅 Enter date range to backfill (YYYY-MM-DD format)")
+        print(f"   Press Enter to use the full range")
+        
+        start_input = input(f"   Start date [{min_date[:10]}]: ").strip()
+        start_date = start_input if start_input else min_date[:10]
+        
+        end_input = input(f"   End date   [{max_date[:10]}]: ").strip()
+        end_date = end_input if end_input else max_date[:10]
+        
+        # Validate dates
+        try:
+            from datetime import datetime
+            datetime.strptime(start_date, '%Y-%m-%d')
+            datetime.strptime(end_date, '%Y-%m-%d')
+        except ValueError:
+            print("❌ Invalid date format. Use YYYY-MM-DD")
+            return
+        
+        # Count matching messages
+        cursor.execute('''SELECT COUNT(*) FROM messages 
+                         WHERE date >= ? AND date < date(?, '+1 day')''',
+                       (start_date, end_date))
+        match_count = cursor.fetchone()[0]
+        
+        if match_count == 0:
+            print("❌ No messages found in that date range")
+            return
+        
+        # Rate limit configuration
+        print(f"\n⚡ Rate limiting:")
+        print(f"   Delay between messages (seconds). Higher = safer from bans.")
+        print(f"   Recommended: 1-3 for small batches, 3-5 for large ones.")
+        delay_input = input(f"   Delay [{2 if match_count < 500 else 4}s]: ").strip()
+        try:
+            delay = float(delay_input) if delay_input else (2 if match_count < 500 else 4)
+            delay = max(0.5, delay)  # Floor at 0.5s
+        except ValueError:
+            delay = 2
+        
+        source_name = self.state.get('channel_names', {}).get(rule.source_channel, rule.source_channel)
+        dest_name = self.state.get('channel_names', {}).get(rule.destination_channel, rule.destination_channel)
+        
+        print(f"\n{'='*45}")
+        print(f"  Rule:     {source_name} → {dest_name}")
+        print(f"  Range:    {start_date} → {end_date}")
+        print(f"  Messages: {match_count}")
+        print(f"  Delay:    {delay}s per message")
+        est_minutes = (match_count * delay) / 60
+        print(f"  Est time: ~{est_minutes:.1f} minutes")
+        print(f"{'='*45}")
+        
+        confirm = input("\nProceed with backfill? (y/n): ").lower().strip()
+        if confirm != 'y':
+            print("Backfill cancelled")
+            return
+        
+        await self.run_backfill(rule, source_channel, start_date, end_date, delay)
+
+    async def run_backfill(self, rule: ForwardingRule, source_channel: str, 
+                           start_date: str, end_date: str, delay: float):
+        conn = self.get_db_connection(source_channel)
+        cursor = conn.cursor()
+        
+        # Determine which messages to forward based on rule content type filters
+        conditions = ["date >= ?", "date < date(?, '+1 day')"]
+        params = [start_date, end_date]
+        
+        media_conditions = []
+        if rule.forward_text:
+            media_conditions.append("(media_type IS NULL AND message != '')")
+            media_conditions.append("(media_type = 'MessageMediaWebPage' AND message != '')")
+        if rule.forward_images:
+            media_conditions.append("media_type = 'MessageMediaPhoto'")
+        if rule.forward_videos:
+            media_conditions.append("(media_type = 'MessageMediaDocument' AND media_path LIKE '%.mp4')")
+            media_conditions.append("(media_type = 'MessageMediaDocument' AND media_path LIKE '%.mov')")
+            media_conditions.append("(media_type = 'MessageMediaDocument' AND media_path LIKE '%.avi')")
+            media_conditions.append("(media_type = 'MessageMediaDocument' AND media_path LIKE '%.mkv')")
+            media_conditions.append("(media_type = 'MessageMediaDocument' AND media_path LIKE '%.webm')")
+        if rule.forward_documents:
+            if not rule.forward_videos:
+                media_conditions.append("(media_type = 'MessageMediaDocument')")
+            else:
+                # Documents but exclude videos already matched above
+                media_conditions.append("(media_type = 'MessageMediaDocument' AND (media_path IS NULL OR (media_path NOT LIKE '%.mp4' AND media_path NOT LIKE '%.mov' AND media_path NOT LIKE '%.avi' AND media_path NOT LIKE '%.mkv' AND media_path NOT LIKE '%.webm')))")
+        
+        if not media_conditions:
+            print("❌ Rule has no content types enabled")
+            return
+        
+        conditions.append(f"({' OR '.join(media_conditions)})")
+        
+        query = f"SELECT message_id FROM messages WHERE {' AND '.join(conditions)} ORDER BY date ASC"
+        cursor.execute(query, params)
+        message_ids = [row[0] for row in cursor.fetchall()]
+        
+        if not message_ids:
+            print("❌ No matching messages found for this rule's content filters")
+            return
+        
+        total = len(message_ids)
+        print(f"\n🚀 Starting backfill of {total} messages...")
+        
+        # Get the source entity for fetching full messages from Telegram
+        try:
+            if source_channel.lstrip('-').isdigit():
+                entity = await self.client.get_entity(PeerChannel(int(source_channel)))
+            else:
+                entity = await self.client.get_entity(source_channel)
+        except Exception as e:
+            print(f"❌ Failed to get source channel entity: {e}")
+            return
+        
+        forwarded = 0
+        failed = 0
+        skipped = 0
+        
+        # Process in batches to avoid holding too many messages in memory
+        batch_size = 20
+        for i in range(0, total, batch_size):
+            batch_ids = message_ids[i:i + batch_size]
+            
+            try:
+                messages = await self.client.get_messages(entity, ids=batch_ids)
+            except FloodWaitError as e:
+                print(f"\n⏳ Rate limited, waiting {e.seconds}s...")
+                await asyncio.sleep(e.seconds)
+                messages = await self.client.get_messages(entity, ids=batch_ids)
+            except Exception as e:
+                print(f"\n❌ Failed to fetch batch: {e}")
+                failed += len(batch_ids)
+                continue
+            
+            for msg in messages:
+                if not msg:
+                    skipped += 1
+                    continue
+                
+                try:
+                    success = await self.forward_message(msg, rule, int(source_channel) if source_channel.lstrip('-').isdigit() else None)
+                    if success:
+                        forwarded += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                
+                # Progress bar
+                done = forwarded + failed + skipped
+                progress = (done / total) * 100
+                bar_length = 30
+                filled_length = int(bar_length * done // total)
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                sys.stdout.write(f"\r📤 Backfill: [{bar}] {progress:.1f}% ({done}/{total}) | ✅{forwarded} ❌{failed} ⏭{skipped}")
+                sys.stdout.flush()
+                
+                # Rate limit delay
+                await asyncio.sleep(delay)
+        
+        print(f"\n\n{'='*45}")
+        print(f"  BACKFILL COMPLETE")
+        print(f"  Forwarded: {forwarded}")
+        print(f"  Failed:    {failed}")
+        print(f"  Skipped:   {skipped} (deleted messages)")
+        print(f"{'='*45}")
 
     async def scrape_channel(self, channel: str, offset_id: int):
         try:
