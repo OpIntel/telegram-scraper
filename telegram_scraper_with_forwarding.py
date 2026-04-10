@@ -14,9 +14,17 @@ from io import StringIO
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage, User, PeerChannel, Channel, Chat
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
+import re
 import qrcode
 
 warnings.filterwarnings("ignore", message="Using async sessions support is an experimental feature")
+
+# Optional proxy support - install with: pip install pysocks python-socks[asyncio]
+try:
+    import socks
+    PROXY_SUPPORT = True
+except ImportError:
+    PROXY_SUPPORT = False
 
 def display_ascii_art():
     WHITE = "\033[97m"
@@ -86,6 +94,7 @@ class OptimizedTelegramScraper:
             'channel_names': {},
             'scrape_media': True,
             'forwarding_rules': [],
+            'proxy': None,
         }
 
     def save_state(self):
@@ -1473,6 +1482,573 @@ class OptimizedTelegramScraper:
             print(f"\n❌ Phone authentication failed: {e}")
             return False
 
+    # ── Proxy Configuration ──────────────────────────────────────────────
+
+    def get_proxy_tuple(self):
+        """Convert stored proxy config into a tuple Telethon understands."""
+        proxy_cfg = self.state.get('proxy')
+        if not proxy_cfg or not proxy_cfg.get('enabled'):
+            return None
+
+        proxy_type_map = {
+            'socks5': socks.SOCKS5 if PROXY_SUPPORT else None,
+            'socks4': socks.SOCKS4 if PROXY_SUPPORT else None,
+            'http': socks.HTTP if PROXY_SUPPORT else None,
+        }
+
+        ptype = proxy_type_map.get(proxy_cfg.get('type', 'socks5'))
+        if ptype is None:
+            return None
+
+        proxy = (ptype, proxy_cfg['host'], int(proxy_cfg['port']))
+        if proxy_cfg.get('username'):
+            proxy = proxy + (True, proxy_cfg['username'], proxy_cfg.get('password', ''))
+        return proxy
+
+    async def configure_proxy(self):
+        """Interactive proxy setup."""
+        print("\n" + "="*45)
+        print("           PROXY CONFIGURATION")
+        print("="*45)
+
+        if not PROXY_SUPPORT:
+            print("\n⚠️  Proxy dependencies not installed.")
+            print("   Install with:  pip install pysocks python-socks[asyncio]")
+            print("   Then restart the scraper.")
+            return
+
+        current = self.state.get('proxy')
+        if current and current.get('enabled'):
+            print(f"\nCurrent proxy: {current['type'].upper()} "
+                  f"{current['host']}:{current['port']}"
+                  f"{' (auth)' if current.get('username') else ''}")
+        else:
+            print("\nProxy: not configured")
+
+        print("\n[1] Set up SOCKS5 proxy")
+        print("[2] Set up SOCKS4 proxy")
+        print("[3] Set up HTTP proxy")
+        print("[T] Test current proxy")
+        print("[4] Disable / remove proxy")
+        print("[5] Back")
+        print("="*45)
+
+        choice = input("Enter your choice: ").strip().lower()
+
+        if choice == 't':
+            await self.test_proxy()
+            return
+
+        if choice in ('1', '2', '3'):
+            type_map = {'1': 'socks5', '2': 'socks4', '3': 'http'}
+            proxy_type = type_map[choice]
+
+            host = input("Proxy host (e.g. 127.0.0.1): ").strip()
+            if not host:
+                print("❌ Host cannot be empty")
+                return
+
+            port_str = input("Proxy port (e.g. 1080): ").strip()
+            try:
+                port = int(port_str)
+                if not (1 <= port <= 65535):
+                    raise ValueError
+            except ValueError:
+                print("❌ Invalid port number")
+                return
+
+            use_auth = input("Proxy requires authentication? (y/n): ").lower().strip()
+            username = password = ''
+            if use_auth == 'y':
+                username = input("Username: ").strip()
+                password = input("Password: ").strip()
+
+            self.state['proxy'] = {
+                'enabled': True,
+                'type': proxy_type,
+                'host': host,
+                'port': port,
+                'username': username,
+                'password': password,
+            }
+            self.save_state()
+            print(f"\n✅ {proxy_type.upper()} proxy configured: {host}:{port}")
+            print("   Restart the scraper or re-initialize the client for changes to take effect.")
+
+        elif choice == '4':
+            self.state['proxy'] = None
+            self.save_state()
+            print("\n✅ Proxy removed. Direct connection will be used on next start.")
+
+    async def test_proxy(self):
+        """Test proxy connectivity by comparing direct vs proxied IP."""
+        proxy_cfg = self.state.get('proxy')
+        if not proxy_cfg or not proxy_cfg.get('enabled'):
+            print("\n❌ No proxy configured. Set one up first.")
+            return
+
+        if not PROXY_SUPPORT:
+            print("\n⚠️  Proxy dependencies not installed.")
+            print("   Install with:  pip install pysocks python-socks[asyncio]")
+            return
+
+        import socket
+
+        proxy_type = proxy_cfg['type'].upper()
+        host = proxy_cfg['host']
+        port = int(proxy_cfg['port'])
+
+        print(f"\n🔍 Testing {proxy_type} proxy at {host}:{port}...")
+        print("─" * 45)
+
+        # Step 1: Basic TCP connectivity to the proxy server
+        print("\n[1/3] Checking proxy is reachable...")
+        try:
+            sock = socket.create_connection((host, port), timeout=10)
+            sock.close()
+            print(f"  ✅ Proxy server {host}:{port} is reachable")
+        except socket.timeout:
+            print(f"  ❌ Connection timed out — proxy at {host}:{port} is not responding")
+            return
+        except ConnectionRefusedError:
+            print(f"  ❌ Connection refused — nothing is listening on {host}:{port}")
+            return
+        except OSError as e:
+            print(f"  ❌ Cannot reach proxy: {e}")
+            return
+
+        # Step 2: Connect to Telegram through the proxy
+        print(f"\n[2/2] Connecting to Telegram API through {proxy_type} proxy...")
+
+        proxy = self.get_proxy_tuple()
+        if not proxy:
+            print("  ❌ Failed to build proxy configuration")
+            return
+
+        try:
+            from telethon import TelegramClient as TestClient
+
+            test_client = TestClient(
+                'proxy_test_session',
+                self.state['api_id'],
+                self.state['api_hash'],
+                proxy=proxy,
+                timeout=20,
+                connection_retries=1,
+            )
+
+            await test_client.connect()
+
+            if await test_client.is_user_authorized():
+                me = await test_client.get_me()
+                display_name = me.first_name or ''
+                if me.last_name:
+                    display_name += f' {me.last_name}'
+                print(f"  ✅ Authenticated as: {display_name} (@{me.username or 'no username'})")
+
+                # Try fetching dialogs as an extra connectivity check
+                dialog_count = 0
+                async for _ in test_client.iter_dialogs(limit=5):
+                    dialog_count += 1
+                print(f"  ✅ Successfully fetched {dialog_count} dialog(s)")
+            else:
+                # Not authorized but connection worked
+                print("  ✅ Connected to Telegram servers (not logged in on this session)")
+
+            await test_client.disconnect()
+
+            # Clean up test session file
+            for f in Path('.').glob('proxy_test_session*'):
+                try:
+                    f.unlink()
+                except:
+                    pass
+
+            print("\n" + "─" * 45)
+            print(f"✅ PROXY IS WORKING!")
+            print(f"   {proxy_type} {host}:{port}")
+            print(f"   Successfully reached Telegram servers through proxy.")
+            print("─" * 45)
+
+        except ConnectionError as e:
+            print(f"  ❌ Connection failed: {e}")
+            print("     The proxy could not reach Telegram's servers.")
+            return
+        except socket.timeout:
+            print("  ❌ Connection timed out reaching Telegram through proxy")
+            return
+        except OSError as e:
+            error_msg = str(e)
+            if '407' in error_msg or 'auth' in error_msg.lower():
+                print("  ❌ Proxy authentication failed — check username/password")
+            else:
+                print(f"  ❌ Connection error: {e}")
+            return
+        except Exception as e:
+            print(f"  ❌ Failed to connect: {e}")
+            return
+        finally:
+            # Clean up test session file on failure too
+            for f in Path('.').glob('proxy_test_session*'):
+                try:
+                    f.unlink()
+                except:
+                    pass
+
+    # ── Search / Query Database ───────────────────────────────────────────
+
+    async def search_messages(self):
+        """Interactive database search across scraped channels."""
+        if not self.state['channels']:
+            print("No channels available. Add and scrape channels first.")
+            return
+
+        while True:
+            print("\n" + "="*45)
+            print("            DATABASE SEARCH")
+            print("="*45)
+            print("[K] Search by keyword / regex")
+            print("[D] Search by date range")
+            print("[U] Search by sender / username")
+            print("[T] Search by media type")
+            print("[A] Advanced search (combine filters)")
+            print("[B] Back")
+            print("="*45)
+
+            choice = input("Enter your choice: ").lower().strip()
+
+            if choice == 'b':
+                break
+            elif choice == 'k':
+                await self._search_keyword()
+            elif choice == 'd':
+                await self._search_date_range()
+            elif choice == 'u':
+                await self._search_sender()
+            elif choice == 't':
+                await self._search_media_type()
+            elif choice == 'a':
+                await self._search_advanced()
+            else:
+                print("Invalid option")
+
+    def _pick_search_channels(self) -> List[str]:
+        """Let user pick which channels to search."""
+        channels_list = list(self.state['channels'].keys())
+        if len(channels_list) == 1:
+            return channels_list
+
+        print("\nSearch in which channel(s)?")
+        for i, ch in enumerate(channels_list, 1):
+            name = self.state.get('channel_names', {}).get(ch, ch)
+            print(f"  [{i}] {name} ({ch})")
+        print(f"  [A] All channels")
+
+        sel = input("Selection: ").strip().lower()
+        if sel == 'a':
+            return channels_list
+
+        selected = []
+        for s in sel.split(','):
+            s = s.strip()
+            try:
+                num = int(s)
+                if 1 <= num <= len(channels_list):
+                    selected.append(channels_list[num - 1])
+            except ValueError:
+                if s in self.state['channels']:
+                    selected.append(s)
+        return selected or channels_list
+
+    def _execute_search(self, channels: List[str], conditions: List[str],
+                        params: List, use_regex: bool = False,
+                        regex_pattern: str = None, limit: int = 50) -> List[dict]:
+        """Run a query across selected channels and return results."""
+        all_results = []
+        for ch in channels:
+            conn = self.get_db_connection(ch)
+            cursor = conn.cursor()
+            ch_name = self.state.get('channel_names', {}).get(ch, ch)
+
+            where = ' AND '.join(conditions) if conditions else '1=1'
+            query = f"SELECT message_id, date, sender_id, first_name, last_name, username, message, media_type, views, forwards, reactions FROM messages WHERE {where} ORDER BY date DESC"
+
+            if use_regex:
+                # filter with LIKE first for speed, then regex in Python
+                cursor.execute(query, params)
+            else:
+                query += f" LIMIT {limit - len(all_results)}"
+                cursor.execute(query, params)
+
+            for row in cursor.fetchall():
+                record = {
+                    'channel': ch_name,
+                    'channel_id': ch,
+                    'message_id': row[0],
+                    'date': row[1],
+                    'sender_id': row[2],
+                    'name': ' '.join(filter(None, [row[3], row[4]])) or str(row[2] or ''),
+                    'username': row[5] or '',
+                    'message': row[6] or '',
+                    'media_type': row[7],
+                    'views': row[8],
+                    'forwards': row[9],
+                    'reactions': row[10],
+                }
+
+                if use_regex and regex_pattern:
+                    if not re.search(regex_pattern, record['message'], re.IGNORECASE):
+                        continue
+
+                all_results.append(record)
+                if len(all_results) >= limit:
+                    break
+
+            if len(all_results) >= limit:
+                break
+
+        return all_results
+
+    def _display_results(self, results: List[dict], show_channel: bool = True):
+        """Pretty-print search results."""
+        if not results:
+            print("\n🔍 No results found.")
+            return
+
+        print(f"\n🔍 Found {len(results)} result(s):\n")
+        print("─" * 70)
+
+        for r in results:
+            header_parts = [f"[{r['date']}]"]
+            if show_channel:
+                header_parts.append(f"#{r['channel']}")
+            sender = f"@{r['username']}" if r['username'] else r['name']
+            if sender:
+                header_parts.append(sender)
+            header_parts.append(f"(msg:{r['message_id']})")
+            print(' '.join(header_parts))
+
+            text = r['message']
+            if text:
+                # Show up to 300 chars
+                display_text = text[:300] + ('...' if len(text) > 300 else '')
+                for line in display_text.split('\n'):
+                    print(f"  {line}")
+
+            meta = []
+            if r['media_type']:
+                meta.append(f"media:{r['media_type']}")
+            if r['views']:
+                meta.append(f"views:{r['views']}")
+            if r['forwards']:
+                meta.append(f"fwd:{r['forwards']}")
+            if r['reactions']:
+                meta.append(f"reactions:{r['reactions']}")
+            if meta:
+                print(f"  📊 {' | '.join(meta)}")
+
+            print("─" * 70)
+
+        if len(results) >= 50:
+            print("(Showing first 50 results. Use Advanced search to change the limit.)")
+
+    async def _search_keyword(self):
+        channels = self._pick_search_channels()
+
+        print("\nEnter search term (prefix with r/ for regex, e.g. r/price.*drop):")
+        term = input("Search: ").strip()
+        if not term:
+            print("❌ Empty search term")
+            return
+
+        use_regex = term.startswith('r/')
+        if use_regex:
+            regex_pattern = term[2:]
+            try:
+                re.compile(regex_pattern)
+            except re.error as e:
+                print(f"❌ Invalid regex: {e}")
+                return
+            # Use a broad LIKE to pre-filter before regex
+            conditions = ["message LIKE ?"]
+            # Extract alphanumeric fragments for LIKE pre-filter
+            fragments = re.findall(r'[a-zA-Z0-9]+', regex_pattern)
+            like_term = f"%{fragments[0]}%" if fragments else "%"
+            params = [like_term]
+        else:
+            conditions = ["message LIKE ?"]
+            params = [f"%{term}%"]
+            regex_pattern = None
+
+        results = self._execute_search(channels, conditions, params,
+                                       use_regex=use_regex,
+                                       regex_pattern=regex_pattern)
+        self._display_results(results, show_channel=len(channels) > 1)
+
+    async def _search_date_range(self):
+        channels = self._pick_search_channels()
+
+        print("\nEnter date range (YYYY-MM-DD). Press Enter to leave open-ended.")
+        start = input("Start date: ").strip()
+        end = input("End date:   ").strip()
+
+        conditions = []
+        params = []
+        if start:
+            conditions.append("date >= ?")
+            params.append(start)
+        if end:
+            conditions.append("date < date(?, '+1 day')")
+            params.append(end)
+
+        if not conditions:
+            print("❌ Provide at least one date")
+            return
+
+        results = self._execute_search(channels, conditions, params)
+        self._display_results(results, show_channel=len(channels) > 1)
+
+    async def _search_sender(self):
+        channels = self._pick_search_channels()
+
+        print("\nSearch by username (without @) or first/last name:")
+        term = input("Sender: ").strip()
+        if not term:
+            print("❌ Empty search term")
+            return
+
+        conditions = ["(username LIKE ? OR first_name LIKE ? OR last_name LIKE ?)"]
+        like = f"%{term}%"
+        params = [like, like, like]
+
+        results = self._execute_search(channels, conditions, params)
+        self._display_results(results, show_channel=len(channels) > 1)
+
+    async def _search_media_type(self):
+        channels = self._pick_search_channels()
+
+        print("\nFilter by media type:")
+        print("  [1] Photos only")
+        print("  [2] Videos only")
+        print("  [3] Documents only")
+        print("  [4] Text only (no media)")
+        print("  [5] Any media")
+
+        choice = input("Selection: ").strip()
+        conditions = []
+        params = []
+
+        if choice == '1':
+            conditions.append("media_type = 'MessageMediaPhoto'")
+        elif choice == '2':
+            conditions.append("media_type = 'MessageMediaDocument'")
+            conditions.append("(media_path LIKE '%.mp4' OR media_path LIKE '%.mov' OR media_path LIKE '%.avi' OR media_path LIKE '%.mkv' OR media_path LIKE '%.webm')")
+        elif choice == '3':
+            conditions.append("media_type = 'MessageMediaDocument'")
+            conditions.append("(media_path NOT LIKE '%.mp4' AND media_path NOT LIKE '%.mov' AND media_path NOT LIKE '%.avi' AND media_path NOT LIKE '%.mkv' AND media_path NOT LIKE '%.webm')")
+        elif choice == '4':
+            conditions.append("media_type IS NULL")
+            conditions.append("message != ''")
+        elif choice == '5':
+            conditions.append("media_type IS NOT NULL")
+            conditions.append("media_type != 'MessageMediaWebPage'")
+        else:
+            print("Invalid option")
+            return
+
+        results = self._execute_search(channels, conditions, params)
+        self._display_results(results, show_channel=len(channels) > 1)
+
+    async def _search_advanced(self):
+        channels = self._pick_search_channels()
+
+        print("\n" + "="*45)
+        print("         ADVANCED SEARCH")
+        print("="*45)
+        print("Leave any field blank to skip that filter.\n")
+
+        conditions = []
+        params = []
+        use_regex = False
+        regex_pattern = None
+
+        # Keyword
+        keyword = input("Keyword (prefix r/ for regex): ").strip()
+        if keyword:
+            if keyword.startswith('r/'):
+                use_regex = True
+                regex_pattern = keyword[2:]
+                try:
+                    re.compile(regex_pattern)
+                except re.error as e:
+                    print(f"❌ Invalid regex: {e}")
+                    return
+                fragments = re.findall(r'[a-zA-Z0-9]+', regex_pattern)
+                if fragments:
+                    conditions.append("message LIKE ?")
+                    params.append(f"%{fragments[0]}%")
+            else:
+                conditions.append("message LIKE ?")
+                params.append(f"%{keyword}%")
+
+        # Date range
+        start = input("Start date (YYYY-MM-DD): ").strip()
+        if start:
+            conditions.append("date >= ?")
+            params.append(start)
+
+        end = input("End date   (YYYY-MM-DD): ").strip()
+        if end:
+            conditions.append("date < date(?, '+1 day')")
+            params.append(end)
+
+        # Sender
+        sender = input("Sender (username or name): ").strip()
+        if sender:
+            like = f"%{sender}%"
+            conditions.append("(username LIKE ? OR first_name LIKE ? OR last_name LIKE ?)")
+            params.extend([like, like, like])
+
+        # Media filter
+        media = input("Media filter (photo/video/doc/text/any or blank): ").strip().lower()
+        if media == 'photo':
+            conditions.append("media_type = 'MessageMediaPhoto'")
+        elif media == 'video':
+            conditions.append("media_type = 'MessageMediaDocument'")
+            conditions.append("(media_path LIKE '%.mp4' OR media_path LIKE '%.mov' OR media_path LIKE '%.avi' OR media_path LIKE '%.mkv' OR media_path LIKE '%.webm')")
+        elif media == 'doc':
+            conditions.append("media_type = 'MessageMediaDocument'")
+        elif media == 'text':
+            conditions.append("media_type IS NULL")
+        elif media == 'any':
+            conditions.append("media_type IS NOT NULL")
+            conditions.append("media_type != 'MessageMediaWebPage'")
+
+        # Min views
+        min_views = input("Minimum views (blank to skip): ").strip()
+        if min_views:
+            try:
+                conditions.append("views >= ?")
+                params.append(int(min_views))
+            except ValueError:
+                pass
+
+        # Result limit
+        limit_str = input("Max results [50]: ").strip()
+        try:
+            limit = int(limit_str) if limit_str else 50
+            limit = max(1, min(limit, 500))
+        except ValueError:
+            limit = 50
+
+        results = self._execute_search(channels, conditions, params,
+                                       use_regex=use_regex,
+                                       regex_pattern=regex_pattern,
+                                       limit=limit)
+        self._display_results(results, show_channel=len(channels) > 1)
+
+    # ── Client Initialization ─────────────────────────────────────────────
+
     async def initialize_client(self):
         if not all([self.state.get('api_id'), self.state.get('api_hash')]):
             print("\n=== API Configuration Required ===")
@@ -1485,7 +2061,14 @@ class OptimizedTelegramScraper:
                 print("Invalid API ID. Must be a number.")
                 return False
 
-        self.client = TelegramClient('session', self.state['api_id'], self.state['api_hash'])
+        proxy = self.get_proxy_tuple()
+        if proxy:
+            proxy_cfg = self.state['proxy']
+            print(f"🌐 Using {proxy_cfg['type'].upper()} proxy: {proxy_cfg['host']}:{proxy_cfg['port']}")
+            self.client = TelegramClient('session', self.state['api_id'], self.state['api_hash'],
+                                         proxy=proxy)
+        else:
+            self.client = TelegramClient('session', self.state['api_id'], self.state['api_hash'])
         
         try:
             await self.client.connect()
@@ -1578,6 +2161,8 @@ class OptimizedTelegramScraper:
             print("[T] Rescrape media")
             print("[F] Fix missing media")
             print("[W] Forwarding rules")
+            print("[D] Search database")
+            print("[P] Proxy settings")
             print("[Q] Quit")
             print("="*40)
 
@@ -1757,6 +2342,12 @@ class OptimizedTelegramScraper:
                 
                 elif choice == 'w':
                     await self.manage_forwarding_rules()
+
+                elif choice == 'd':
+                    await self.search_messages()
+
+                elif choice == 'p':
+                    await self.configure_proxy()
                     
                 elif choice == 'q':
                     print("\n👋 Goodbye!")
