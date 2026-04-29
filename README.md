@@ -1,207 +1,188 @@
-# Telegram Channel Scraper 📱
+# TGS: Telegram Scraper, Forwarder & Viewer
 
-A powerful Python script that allows you to scrape messages and media from Telegram channels using the Telethon library. Features include real-time continuous scraping, media downloading, and data export capabilities.
+A Python tool for scraping Telegram channels into local SQLite databases, with built-in real-time message forwarding between channels and a self-contained offline HTML viewer for browsing the results.
 
 ```
 ___________________  _________
 \__    ___/  _____/ /   _____/
-  |    | /   \  ___ \_____  \ 
+  |    | /   \  ___ \_____  \
   |    | \    \_\  \/        \
   |____|  \______  /_______  /
                  \/        \/
 ```
 
-## What's New in v3.1 🎉
+## Features
 
-**Enhanced Message Data:**
-- **Message statistics** - Captures views, forwards, and post_author for each message
-- **Reactions support** - Records all emoji reactions with counts (e.g., "😀 12 👍 3")
-- **Automatic database migration** - Seamlessly adds new columns to existing databases
-- **Richer exports** - All new data included in CSV/JSON exports
+**Scraping**
+- Scrape any channel you're a member of into a per-channel SQLite database (`<channel_id>/<channel_id>.db`)
+- Captures message text, sender info, dates, replies, views, forwards, reactions, and post authors
+- Optional media download (photos, videos, documents) with a toggle
+- Continuous (live) scraping mode that keeps the DB up to date as new messages arrive
+- Concurrent media downloads with configurable batch size and automatic FloodWait handling
+- Rescrape and "fix missing media" tools to repair partial downloads
 
-**Improved Channel Management:**
-- **Channel names displayed** - Shows channel names alongside IDs everywhere
-- **Smart filtering** - List option now only shows Channels and Groups (no private chats)
-- **channels_list.csv export** - Automatically saves channel list with names, IDs, usernames, and types
-- **"all" selection** - Quickly add all listed channels at once
-- **Better export naming** - Files now named as `ID_username.csv` and `ID_username.json`
+**Forwarding**
+- Real-time forwarding rules from a source channel to a destination channel
+- Filter by content type (text, images, videos, documents)
+- Two modes: **copy** (sends as a new message, no "Forwarded from" header) or **forward** (preserves the header)
+- Toggle rules on/off, edit, or delete without restarting
+- **Backfill** historical messages over a chosen date range with adjustable delay
+- **Combined mode** runs scraping and forwarding together in a single session
 
-**Bug Fixes:**
-- **Fixed channel ID parsing** - Resolved "invalid literal for int()" error in fix missing media
-- **Better entity resolution** - Handles both numeric IDs and channel usernames
-- **Improved error messages** - Shows channel names with IDs for clearer debugging
+**Search**
+- Query scraped databases by keyword/regex, date range, sender/username, or media type
+- Advanced search combines multiple filters
+- Search across one channel, several, or all of them at once
 
-## Features 🚀
+**Auth & networking**
+- Sign in via QR code (displayed as ASCII art in the terminal) or phone number
+- Two-factor authentication supported
+- Optional SOCKS5, SOCKS4, or HTTP proxy with auth, plus a built-in proxy connectivity test
 
-- **QR Code & Phone Authentication** - Choose your preferred login method
-- Scrape messages with full metadata (views, forwards, reactions, post author)
-- Download media files with parallel processing and unique naming
-- Real-time continuous scraping
-- Export data to JSON and CSV formats with enhanced metadata
-- SQLite database storage with automatic schema migration
-- Resume capability (saves progress)
-- Interactive menu with channel names and numbered selection
-- Smart channel filtering (only shows channels/groups)
-- Progress tracking with visual progress bars
-- Automatic channels list export to CSV
+**Export**
+- One-shot export of every tracked channel to CSV and JSON, written next to the database
 
-## Prerequisites 📋
+**Offline viewer (`telegram-viewer.html`)**
+- Single-file HTML app you can open directly in a browser, no server or install required
+- Loads `.db` files via sql.js (compiled SQLite running in the browser)
+- Drop in the channel folder to attach scraped media (photos and videos render inline)
+- Load multiple chats at once and switch between them
+- Per-chat search and a global search across all loaded chats
+- Strict CSP, so it runs entirely offline with no network requests after load
 
-Before running the script, you'll need:
+## Requirements
 
-- Python 3.7 or higher
-- Telegram account
-- API credentials from Telegram
+- Python 3.9+
+- A Telegram account
+- Telegram API credentials (`api_id` and `api_hash`), available at https://my.telegram.org
 
-### Required Python packages
+### Python dependencies
 
-```
-pip install -r requirements.txt
-```
-
-## Getting Telegram API Credentials 🔑
-
-1. Visit https://my.telegram.org/auth
-2. Log in with your phone number
-3. Click on "API development tools"
-4. Fill in the form:
-   - App title: Your app name
-   - Short name: Your app short name
-   - Platform: Can be left as "Desktop"
-   - Description: Brief description of your app
-5. Click "Create application"
-6. You'll receive:
-   - `api_id`: A number
-   - `api_hash`: A string of letters and numbers
-   
-Keep these credentials safe, you'll need them to run the script!
-
-## Setup and Running 🔧
-
-1. Clone the repository:
 ```bash
-git clone https://github.com/unnohwn/telegram-scraper.git
-cd telegram-scraper
+pip install telethon qrcode
 ```
 
-2. Install requirements:
+Optional, only needed if you want to route through a proxy:
+
 ```bash
-pip install -r requirements.txt
+pip install pysocks "python-socks[asyncio]"
 ```
 
-3. Run the script:
-```bash
-python telegram-scraper.py
-```
+## Setup
 
-4. On first run, you'll be prompted to enter:
-   - Your API ID (from my.telegram.org)
-   - Your API Hash (from my.telegram.org)
-   - **Choose authentication method:**
-     - **QR Code** (Recommended) - Scan with your phone (no phone number needed)
-     - **Phone Number** - Traditional SMS verification
+1. Install dependencies (above).
+2. Run the scraper:
+   ```bash
+   python telegram_scraper_with_forwarding.py
+   ```
+3. On first launch it will ask for your `api_id` and `api_hash`, then walk you through QR or phone login. Credentials and session state are saved to `state.json` in the working directory.
 
-## Usage 📝
-
-The script provides a clean interactive menu:
+## Main menu
 
 ```
-========================================
-           TELEGRAM SCRAPER
-========================================
-[S] Scrape channels
-[C] Continuous scraping  
-[M] Media scraping: ON
+[S] Scrape channels                [W] Forwarding rules
+[C] Continuous scraping            [D] Search database
+[B] Combined scrape + forward      [P] Proxy settings
+[M] Media scraping: ON/OFF         [Q] Quit
 [L] List & add channels
 [R] Remove channels
-[E] Export data
+[E] Export data (CSV + JSON)
 [T] Rescrape media
-[Q] Quit
-========================================
+[F] Fix missing media
 ```
 
-### Channel Selection Made Easy 🔢
+Typical first-run flow: `L` to list and add channels you're in, then `S` to scrape, or `C` for live, or `B` if you also have forwarding rules configured.
 
-Instead of typing long channel IDs, use numbers:
+## Forwarding rules
 
-**Adding Channels:**
+Open with `[W]` from the main menu.
+
+- `[A]` Add: pick source, pick destination (a tracked channel, a `@username`, or a raw `-100...` ID), pick content types, pick copy vs forward.
+- `[E]` Edit, `[T]` toggle, `[D]` delete an existing rule.
+- `[S]` Start forwarding: listens for new messages and forwards them according to enabled rules.
+- `[H]` Backfill: replay messages from a date range through a rule (useful when you set up a rule after the fact). The source channel must already be scraped locally.
+
+## File layout
+
+After running, your working directory will look something like:
+
 ```
-[1] Tech News (ID: -1002116176890, Type: Channel, Username: @technews)
-[2] Python Dev (ID: -1001597139842, Type: Group, Username: @pythondev)
-[3] Daily Updates (ID: -1002274713954, Type: Channel, Username: @dailyupdates)
-
-Enter: 1,3 (adds channels 1 and 3)
-Or: all (adds all listed channels)
+.
+├── telegram_scraper_with_forwarding.py
+├── telegram-viewer.html
+├── state.json                       # config, session state, rules
+├── -1001234567890/                  # one folder per channel
+│   ├── -1001234567890.db            # SQLite messages DB
+│   ├── -1001234567890_<name>.csv    # created by [E] export
+│   ├── -1001234567890_<name>.json   # created by [E] export
+│   └── media/
+│       ├── photos/
+│       ├── videos/
+│       └── documents/
+└── channels_list.csv                # optional, from [L]
 ```
 
-**Viewing Your Channels:**
+## Using the offline viewer
+
+1. Open `telegram-viewer.html` in any modern browser, or serve it over `localhost` (see below).
+2. Click **Choose Files** and select one or more `.db` files (and optionally exported `.json` files).
+3. To make media render inline, also point the media picker at the channel folder so the viewer can resolve the relative paths stored in the DB.
+4. Use the per-chat search box to filter messages within a chat, or the top search to search across every chat you've loaded.
+
+The viewer is fully client-side. Nothing is uploaded anywhere; your DB never leaves the browser tab.
+
+### Serving over localhost (recommended)
+
+Some browsers restrict what a page opened via `file://` can load. sql.js's WebAssembly, the directory picker, and media blobs all behave better when the viewer is served over HTTP. Run a tiny local server in the folder that contains `telegram-viewer.html` and your channel folders, then visit `http://localhost:8000/telegram-viewer.html`.
+
+**Linux / macOS**
+
+```bash
+cd /path/to/your/scraper-folder
+python3 -m http.server 8000
 ```
-[1] Tech News (ID: -1002116176890), Last Message ID: 5234, Messages: 12450
-[2] Python Dev (ID: -1001597139842), Last Message ID: 8192, Messages: 45782
+
+**Windows (PowerShell or CMD)**
+
+```powershell
+cd C:\path\to\your\scraper-folder
+python -m http.server 8000
 ```
 
-**Scraping Channels:**
-- Single: `1`
-- Multiple: `1,3,5`
-- All: `all`
-- Mix formats: `1,-1001597139842,3`
+Stop the server with `Ctrl+C`. The server only listens on your own machine; nothing is exposed to the network. If port 8000 is taken, pick another (for example, `8080`).
 
-## Data Storage 💾
+If you don't have Python on the path, any other static server works too: `npx serve`, `php -S localhost:8000`, VS Code's "Live Server" extension, and so on.
 
-### Database Structure
+## Database schema
 
-Data is stored in SQLite databases, one per channel:
-- Location: `./channelname/channelname.db`
-- Optimized with indexes for fast queries
-- WAL mode for better performance
-- Schema includes: message_id, date, sender info, message text, media info, reply_to, post_author, views, forwards, reactions
-- Automatic migration adds new columns to existing databases
+Each `<channel>/<channel>.db` contains a single `messages` table:
 
-### Media Storage 📁
+| Column | Type | Notes |
+|---|---|---|
+| `message_id` | INTEGER UNIQUE | Telegram message ID |
+| `date` | TEXT | ISO timestamp |
+| `sender_id` | INTEGER | |
+| `first_name`, `last_name`, `username` | TEXT | |
+| `message` | TEXT | message body |
+| `media_type` | TEXT | `photo`, `video`, `document`, etc. |
+| `media_path` | TEXT | relative path to the downloaded file |
+| `reply_to` | INTEGER | replied-to message id |
+| `post_author` | TEXT | for channels with signed posts |
+| `views`, `forwards` | INTEGER | |
+| `reactions` | TEXT | serialized reaction summary |
 
-Media files are stored with unique naming:
-- Location: `./channelname/media/`
-- Format: `{message_id}-{unique_id}-{original_name}.ext`
-- **No more file overwrites** - Each file gets a unique name
+The DB uses WAL mode and indexes on `message_id` and `date`. The script auto-migrates older DBs that are missing newer columns.
 
-### Exported Data 📊
+## Notes & limits
 
-Export formats:
-1. **CSV**: `./channelname/channelid_username.csv`
-2. **JSON**: `./channelname/channelid_username.json`
-3. **Channel List**: `./channels_list.csv` (automatically created when using [L] option)
+- You can only scrape and forward channels your account is a member of, since Telegram enforces this server-side.
+- Telegram applies aggressive rate limits. The scraper handles `FloodWaitError` automatically by sleeping the requested duration, but very large backfills will still take time.
+- `state.json` contains your `api_id`, `api_hash`, and references to your session, so treat it like a credential file.
+- Be mindful of Telegram's Terms of Service and the rules of any channel you scrape or repost from.
 
-All exports include complete message metadata: views, forwards, reactions, and post author information.
+## Troubleshooting
 
-## Performance Features ⚙️
-
-- **5 concurrent downloads** for faster media processing
-- **Batch database operations** for optimal speed
-- **Progress bars** with real-time feedback
-- **Resume capability** - Continue where you left off
-- **Memory-efficient** exports for large datasets
-
-## Error Handling 🛠️
-
-- Automatic retry with exponential backoff
-- Rate limit compliance
-- Network error recovery
-- State preservation during interruptions
-
-## Limitations ⚠️
-
-- Respects Telegram's rate limits
-- Can only access public channels or channels you're a member of
-- Media download size limits apply as per Telegram's restrictions
-
-## License 📄
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Disclaimer ⚖️
-
-This tool is for educational purposes only. Make sure to:
-- Respect Telegram's Terms of Service
-- Obtain necessary permissions before scraping
-- Use responsibly and ethically
-- Comply with data protection regulations
+- **"Proxy dependencies not installed"**: run `pip install pysocks "python-socks[asyncio]"` and restart.
+- **Login keeps failing**: delete the `.session` file in the working directory and log in again.
+- **Media is missing in the viewer**: make sure you also picked the channel folder (or its parent) in the media picker so relative paths resolve.
+- **Some messages show no media even after scraping**: use `[F] Fix missing media` from the main menu to retry just the missing files.
